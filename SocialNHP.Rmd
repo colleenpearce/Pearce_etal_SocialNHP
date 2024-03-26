@@ -646,7 +646,7 @@ However, we first had to filter the data, as some animals did not having samples
 orange = list(name = "1v2-4", excluded_names = c("Popeye", "Quinn"), excluded_timepoints = c(6))
 yellow = list(name = "1v6", excluded_names = c("Popeye", "Quinn", "Eli"), excluded_timepoints = c(2, 3, 4))
 blue = list(name = "2v3-4", excluded_names = c("No Exclusion"), excluded_timepoints = c(1,6))
-green = list(name = "2v-6", excluded_names = c("Eli"), excluded_timepoints = c(1))
+green = list(name = "2v3-6", excluded_names = c("Eli"), excluded_timepoints = c(1))
 comparisons = list(orange, yellow, blue, green)
 
 # data structure to hold results for all comparisons
