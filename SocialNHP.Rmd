@@ -1,0 +1,793 @@
+---
+title: 'Social Monkey Data Analysis and Figure Creation'
+author: "Pearce et al."
+date: "2024-03-26"
+output: 
+  html_document:
+    fig_width: 7.5
+    fig_height: 7.5
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+This document, in conjunction with the **DataAnalaysisFunctions.R** file, comprises the full scripting for our data analysis procedures (post-sample sequencing).
+
+**Installation Requirements:**
+
+* R language, minimum version 4.3.2 (via https://cran.r-project.org/)
+* The following R packages via `install.packages()`:
+    * languageserver, rmarkdown, httpgd
+* The Bioconductor package manager `BiocManager` (via https://cran.r-project.org/web/packages/BiocManager/vignettes/BiocManager.html)
+* The following Bioconductor packages via `BiocManager::install()`:
+    * tidyverse, vegan, magrittr, glue, ggpubr, svglite, RColorBrewer, phyloseq, microbiomeMarker, rstatix
+* The `pairwiseAdonis` R package (via GitHub at https://github.com/pmartinezarbizu/pairwiseAdonis)
+
+```{r, "Set Seed and Retrieve Source Code"}
+# Set seed to ensure consistent random number results
+set.seed(42)
+
+# Retrieve source code for data analysis functions
+source("DataAnalysisFunctions.R")
+```
+
+***
+Load in required packages. If needed, install packages using `install.packages()`
+```{r, "Load Required Packages"}
+library(tidyverse)
+library(vegan)
+library(phyloseq)
+library(microbiomeMarker)
+library(magrittr)
+library(glue)
+library(ggpubr)
+library(svglite)
+library(RColorBrewer)
+library(rstatix)
+library(pairwiseAdonis)
+```
+
+***
+### Prepare Data for Analysis and Figure Creation
+
+Load in the meta data files
+```{r, "Load in RDS Objects"}
+metadata <- "MetaDataFiles/metadata.RDS" %>% glue() %>% readRDS()
+ps <- "MetaDataFiles/ps.RDP.tree.RDS" %>% glue() %>% readRDS()
+# 'ps' is phyloseq
+```
+
+Modify the meta data files:
+```{r, "Modifying the Phyloseq Object"}
+ps %<>% subset_samples(Sex == "Male") %>%  # remove non-male samples
+  subset_samples(!(SampleNum %in% c("Quinn1_S11", "Eli6_S54"))) %>% # removing low read-count samples. Explanation for removal of these samples is discussed in the main text.
+  rarefy_even_depth(sample.size = 25000) # Rarefying samples to 25,000 reads
+
+# Removing non-relevant columns
+sample_data(ps)[, c("X.NAME", "Age", "Trace", "Sex")] <- NULL 
+
+# Making the 'Timepoint' column into a categorical factor
+sample_data(ps)$Timepoint %<>% as.factor
+
+# Making a 'Diet' column to indicate diet condition at each timepoint 
+sample_data(ps)$Diet <- ps %>%
+  sample_data() %>%
+  as("data.frame") %>%
+  mutate(Diet = case_when(
+    Timepoint %in% "1" ~ "Uncontrolled",
+    Timepoint %in% c("2", "3", "4", "6") ~ "Controlled"
+    )) %>%
+    pull(Diet)
+
+# Important Note: Our 'RSL' timepoint discussed in the main text is labelled 'T6' throughout this script for ease
+```
+
+Add in alpha diversity measures:
+```{r, "Add in Alpha Diversity to the Phyloseq Object"}
+measures <- c("Observed", "Chao1", "Shannon", "Fisher")
+for (measure in measures) {
+    sample_data(ps)[[measure]] <- estimate_richness(ps, measures = measure)[, 1]
+}
+```
+
+Create a tibble and add in abundance values
+```{r, "Create a Tibble from the Phyloseq Object and Add in Abundance Values"}
+melt <- ps %>%
+    tax_glom(taxrank = "Family") %>%
+    transform_sample_counts(function(otu) otu / sum(otu)) %>%
+    psmelt() %>%
+    mutate(Family = ifelse(Abundance < 0.05, "Other", Family)) %>%
+    filter(Abundance != 0) %>%
+    mutate(Family = gsub("_1$", "", Family)) %>%
+    mutate(Family = reorder(Family, ifelse(Family == "Other", 1, 0)))
+View(melt)
+```
+
+The data has been prepped. 
+We can now produce figures and conduct our statistical analyses.
+
+***
+
+###  Figure Creation and Data Analysis               
+
+*Note that Figure 1A, the study design, was created using Adobe Illustrator.*
+
+We began by inspecting the diversity of our samples with plots of relative abundance.
+In the main text we report relative abundance across timepoints (Fig. 1B) and report relative abundance by animal in our supplemental materials (Fig. S1).
+
+</br>
+
+##### Figure 1B: Relative Bacterial Abundance Across Timepoints (by Bacteria)
+
+```{r, "Figure 1: Relative Abundance by Bacteria"}
+n_taxa = melt %>% select(Family) %>% unique %>% nrow
+rel_abund_palette <- c(brewer.pal(n = n_taxa - 1, name = "Set3"), "#000000")
+relative_abundance_bacteria <- plot_bar_graph_bacteria(melt, rel_abund_palette) %>%
+  annotate_figure(
+    top = text_grob("Relative Abundance by Bacteria at the Family Level",
+      face = "bold",
+      size = 14
+    ),
+    bottom = text_grob("Timepoint", size = 14),
+    left = text_grob("Relative Abundance", size = 14, rot = 90, vjust = 1)
+  ) %T>% plot
+```
+
+***
+
+##### Supplementary Figure 1 (S1): Relative Bacterial Abundance Across Timepoints (by Animal)
+
+```{r, "Supplemental Sigure 1: Relative Abundance by Animal"}
+n_taxa = melt %>% select(Family) %>% unique %>% nrow
+rel_abund_palette <- c(brewer.pal(n = n_taxa - 1, name = "Set3"), "#000000")
+
+graph_rel_abund <- ggarrange(
+    plotlist = unique(meta(ps)[["Name"]]) %>%
+        map(plot_bar_graph, palette = rel_abund_palette), ncol = 4, nrow = 4, common.legend = TRUE) %>%
+    annotate_figure(
+        top = text_grob("Relative Abundance by Individual at the Family Level", face = "bold", size = 14),
+        bottom = text_grob("Timepoint", size = 14),
+        left = text_grob("Relative Abundance", size = 14, rot = 90, vjust = 1)
+     ) %T>% plot
+```
+
+***
+
+#### Figure 2: Changes in diet result in changes in gut microbiota composition
+
+Next, we look at the effect of diet on gut microbiota composition. 
+To do this we compare timepoints 1(T1) and 2(T2), which is uncontrolled diet and controlled diet, respectively. 
+
+We began by assessing alpha diversity with a non-parametric Wilcoxon signed-rank test (comparing T1 and T2) and visualizing with a boxplot (Fig. 2A). 
+Then we conducted a PERMANOVA with T1 and T2 data, and visualized this data with NMDS plots (Fig. 2B).
+Finally, we used the linear discriminant analysis effect size (LEfSe) method to identify bacterial families driving our diet effect and also visualized this data via boxplot (Fig. 2C).
+
+Reported in the main text for all analyses are the **family level results and those obtained with weighted UniFrace distances**. 
+Genus level results and results obtained with Bray-Curtis distances are reported in the supplementary files.
+
+</br>
+
+##### Figure 2A: Chao1 Alpha Diversity Across Timepoints
+*Note that we assess alpha diversity with four different metrics, but only discuss one metric, **Chao1**, in the main text. The additional measures of alpha diversity are presented in the supplmental materials.*
+
+```{r, "Figure 2A: Chao1 Alpha Diversity for T1 and T2 - Diet Effect"}
+# Alpha diversity for diet manipulation, comparing T1 and T2.
+group <- "Timepoint"
+measures <- c("Observed", "Chao1", "Shannon", "Fisher")
+diet_palette <- c("#E31A1C","#A6CEE3")
+
+# clean data of excluded samples. Sample exclusion is dicsussed in the main text 
+clean_ps <- ps %>%
+    subset_samples(Timepoint %in% c(1,2) & !(Name %in% c("Quinn", "Popeye", "Eli"))) %>%
+    meta()
+
+diet_alpha_diversity <- clean_ps %>%
+    aggregate_plot_alpha_diet(group, measures, diet_palette) %T>% plot
+
+# Statistical testing of alpha diversity - Wilcoxon signed-rank tests
+wilcox_observed <- clean_ps %>%
+    wilcox_test (formula = Observed ~ Timepoint, paired = TRUE) 
+ 
+wilcox_chao1 <- clean_ps %>%
+    wilcox_test (formula = Chao1 ~ Timepoint, paired = TRUE)
+
+wilcox_shannon <- clean_ps %>%
+    wilcox_test (formula = Shannon ~ Timepoint, paired = TRUE)
+
+wilcox_fisher <- clean_ps %>%
+    wilcox_test (formula = Fisher ~ Timepoint, paired = TRUE)
+
+ # Note: Significance bars were added to graphs afterwards using Adobe Illustrator
+```
+
+From these plots and anlyses, specifically **Chao1**, we see that our alpha diversity does differ significantly between T1 and T2.
+This indicates that the change in diet from uncontrolled to controlled significantly changed the species richness in the gut microbiota.
+
+Next we assess beta diversity.
+
+</br>
+
+##### Figure 2B: NMDS plots for T1 and T2 - Diet Effect
+*Note that the genus level results and the results obtained with Bray-curtis distances are presented in the supplemental materials.*
+
+```{r, "Figure 2B: NMDS plots for T1 and T2 - Diet Effect"}
+# Removing two animals due to no data being available. Smaple exlcusion is dicsused in the main text.
+ps_diet <- ps %>% subset_samples(!(Name %in% c("Quinn", "Popeye"))) %>% subset_samples(!(Timepoint %in% c(3, 4, 6)))
+
+# Ordination function for the diet effect plots
+ordination_plot <- function(method, rank) {
+    suppressWarnings({
+        ps_diet_modified <- ps_diet %>% tax_glom(rank)
+        ord_diet <- ordinate(ps_diet_modified, method = "NMDS", distance = method)
+
+        perms_diet <- how(plots = Plots(strata = (meta(ps_diet))$Name, type = "free"), nperm = 1000)
+        perm <- adonis2(distance(ps_diet_modified, method) ~ Timepoint, data = meta(ps_diet_modified), permutations = perms_diet)
+        print(perm)
+
+        p.value = format(perm$`Pr(>F)`, digits = 4)
+        df = perm$Df
+        F.stat = format(perm$F, digits = 4)
+    })
+
+    if (method == "wunifrac") method <- "Weighted Unifrac"
+    else if (method == "bray") method <- "Bray-Curtis"
+
+    graph <- plot_ordination(physeq = ps_diet_modified, ordination = ord_diet) +
+        geom_point(aes(color = Timepoint)) +
+        stat_ellipse(aes(color = Timepoint)) +
+        theme_bw() +
+        theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) + 
+        labs(
+          caption = str_glue("PerMANOVA: F({df[1]}, {df[2]}) = {F.stat}, p = {p.value}."),
+          title = glue("{method} NMDS Plot of Diet at the {rank} level"),
+          color = str_glue("Timepoint")
+        ) +
+        scale_color_manual(values = c("#E31A1C", "#A6CEE3"))
+     return(graph)
+}
+
+# Run the analysis and print the graphs for family and genus Levels
+ordination_graph_diet_wunifrac_family <- ordination_plot("wunifrac", "Family") %T>% plot
+
+ordination_graph_diet_wunifrac_genus <- ordination_plot("wunifrac", "Genus") %T>% plot
+
+ordination_graph_diet_bray_family <- ordination_plot("bray", "Family") %T>% plot
+
+ordination_graph_diet_bray_genus <- ordination_plot("bray", "Genus") %T>% plot
+```
+
+Looking at our NMDS plots, specifically the family level results calculated with weighted UniFrac distances, we see that our PERMANOVA analysis revealed a significant effect of diet on gut microbiota composition.
+
+To follow-up this significant PERMANOVA result, we conducted an LEfSe analysis to identify bacteria that are driving the significant diet effect. 
+
+</br>
+
+##### Figure 2C: LEfSe Tests & Plots for the Diet Effect
+*Note that the genus level analysis is presented in the supplmental materials and is not discussed in the main text.*
+
+```{r, "Figure 2C: LEfSe Tests & Plots for Diet Effect"}
+# Differential Bacterial Abundance for the Diet Effect: Timepoints 1 and 2
+
+#----- FAMILY LEVEL -----#
+
+# Run LEfSe analysis
+lefse_diet_family <- ps_diet %>%
+run_lefse(
+  group = "Diet",
+  taxa_rank = "Family",
+  wilcoxon_cutoff = 0.05,
+  kw_cutoff = 0.05,
+  lda_cutoff = 3
+)
+
+# View results
+lefse_diet_family_RESULTS <- marker_table(lefse_diet_family) %>% as_tibble %>% mutate(Test = "Timepoint")
+View(lefse_diet_family_RESULTS)
+
+# Graph results
+graph_relAbund_diet_family <- lefse_diet_family %>%
+plot_abundance(group = "Diet") +
+scale_x_continuous(trans = "log10") +
+labs(
+  x = "Total Abundance",
+  y = "Taxon",
+  title = "LEfSe Differential Abundance for Diet at the Family Level"
+) +
+theme(plot.title = element_text(face="bold"), panel.grid = element_blank()) +
+scale_y_discrete(labels = function(x) gsub("_.*", "", x)) +
+scale_fill_manual(values = alpha(c("#A6CEE3", "#E31A1C"), 0.6))
+plot(graph_relAbund_diet_family)
+
+#----- GENUS LEVEL -----#
+
+# Run LEfSe analysis
+lefse_diet_genus <- ps_diet %>%
+run_lefse(
+  group = "Diet",
+  taxa_rank = "Genus",
+  wilcoxon_cutoff = 0.05,
+  kw_cutoff = 0.05,
+  lda_cutoff = 3
+)
+
+# View results
+lefse_diet_genus_RESULTS <- marker_table(lefse_diet_genus) %>% as_tibble %>% mutate(Test = "Timepoint")
+View(lefse_diet_genus_RESULTS)
+
+# Graph results
+graph_relAbund_diet_genus <- lefse_diet_genus %>%
+plot_abundance(group = "Diet") +
+scale_x_continuous(trans = "log10") +
+labs(
+  x = "Total Abundance",
+  y = "Taxon",
+  title = "LEfSe Differential Abundance for Diet at the Genus Level"
+) +
+theme(plot.title = element_text(face="bold"), panel.grid = element_blank()) +
+scale_y_discrete(labels = function(x) gsub("_.*", "", x)) +
+scale_fill_manual(values = alpha(c("#A6CEE3", "#E31A1C"), 0.6))
+plot(graph_relAbund_diet_genus)
+```
+
+***
+#### Figure 3: Changes in social living conditions result in changes in gut microbiota composition
+
+We next move onto the effect of social living condition on gut microbiota composition.
+Once again, we assess alpha and beta diversity measures. 
+
+We began by assessing alpha diversity with a non-parametric Friedman test (comparing timepoints 2, 3, 4, and RSL(6)) and visualizing with a boxplot (Fig. 3A). 
+Then we conducted a PERMANOVA with T2, T3, T4, and RSL data and visualized this data with NMDS plots (Fig. 3B).
+Finally, we finished with an LEfSe analysis to identify bacterial families driving our social living effect. These data are also visualized via boxplot (Fig. 3C).
+
+</br>
+
+##### Figure 3A: Alpha Diversity Plot for T2, T3, T4, & RSL(T6) - Social Living Effect
+*Note that we assess alpha diversity with four different metrics, but only discuss one metric, **Chao1**, in the main paper text.*
+*The additional measures of alpha diversity are presented in the supplmental materials.*
+
+```{r, "Figure 3A: Chao1 Alpha Diveristy for T2, T3, T4, & RSL(T6) - Social Living Effect"}
+# Alpha diversity for social manipulation (T2, T3, T4, RSL)
+group <- "Timepoint"
+measures <- c("Observed", "Chao1", "Shannon", "Fisher")
+social_palette <- c("#A6CEE3", "#B2DF8A", "#33A02C", "#1F78B4")
+
+social_alpha_diversity <- ps %>%
+    subset_samples(Timepoint %in% c(2,3,4,6) & !(Name %in% c("Quinn", "Popeye", "Eli"))) %>%
+    meta() %>%
+    aggregate_plot_alpha_social(group, measures, social_palette) %T>% plot
+```
+
+From these plots and anlyses, specifically **Chao1**, we see that our alpha diversity did not differ significantly between T2, T3, T4, and RSL.
+This indicates that the change in social living conditions, from single, to social, and back to single, did not significantly change the species richness in the gut microbiota.
+This is not surprising as with out our diet control we would not expect to see new bacteria introduced to the animals' gut microbiota.
+
+Next we assess beta diversity.
+
+</br>
+
+##### Figure 3B: NMDS plots for T2, T3, T4, & RSL(T6) - Social Living Effect
+*Note that the genus level analysis and the results obtained with Bray-curtis distances are presented in the supplmental materials and are not discussed in the paper.*
+
+```{r, "Figure 3B: NMDS plots for T2, T3, T4, & RSL(T6) - Social Living Effect"}
+# Removing one animal due to no data collection for them at the RSL timepoint. Sample exclusion is discussed in the main text
+ps_social <- ps %>% subset_samples(!(Name %in% "Eli"))
+
+# Palette for analyses of the social effect
+social_palette <- c("#A6CEE3", "#B2DF8A", "#33A02C", "#1F78B4")
+
+# Ordination function for the effect of social living plots
+ordination_plot2 <- function(method, rank) {
+    suppressWarnings({
+        ps_social_modified <- ps_social %>% subset_samples(!(Timepoint %in% c("1"))) %>% tax_glom(rank) 
+        ord_social <- ordinate(ps_social_modified, method = "NMDS", distance = method)
+
+        perms_social <- how(blocks = (meta(ps_social_modified))$Name, nperm = 1000)
+        perm <- adonis2(distance(ps_social_modified, method) ~ Timepoint, data = meta(ps_social_modified), permutations = perms_social)
+        
+        p.value = format(perm$`Pr(>F)`, digits = 4)
+        df = perm$Df
+        F.stat = format(perm$F, digits = 4)
+    })
+
+  if (method == "wunifrac")method <- "Weighted Unifrac"
+  else if (method == "bray") method <- "Bray-Curtis"
+
+    graph <- plot_ordination(physeq = ps_social_modified, ordination = ord_social) +
+      geom_point(aes(color = Timepoint)) +
+      stat_ellipse(aes(color = Timepoint)) +
+      theme_bw() +
+      theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) +
+      labs(
+            caption = str_glue("PerMANOVA: F({df[1]}, {df[2]}) = {F.stat}, p = {p.value}."),
+            title = str_glue("{method} NMDS Plot of Social Living at the {rank} Level"),
+            color = str_glue("Timepoint")
+      ) +
+      scale_color_manual(values = social_palette)
+    return(graph)
+}
+
+# Run the analysis and print the graphs for family and genus Levels
+ordination_graph_social_wunifrac_family <- ordination_plot2("wunifrac", "Family") %T>% plot
+
+ordination_graph_social_wunifrac_genus <- ordination_plot2("wunifrac", "Genus") %T>% plot
+
+ordination_graph_social_bray_family <- ordination_plot2("bray", "Family") %T>% plot
+
+ordination_graph_social_bray_genus <- ordination_plot2("bray", "Genus") %T>% plot
+
+```
+
+Our PERMANOVA analysis revealed a significant effect of social living condition on gut microbiota composition.
+To assess which timepoints are driving this effect we conducted pairwise comparisons.
+We conducted this analysis at the family level with weighted UniFrac distances.
+
+</br>
+
+**Follow-up Pairwise Comparisons for the Significant Effect of Social Living**
+
+```{r, "PERManova Follow-up Statistics for Social Effect"}
+
+# ------ Weighted Unifrac Matrix ------ #
+dist_wunifrac <- phyloseq::distance(ps, method = "wunifrac")
+
+# ------ Run pairwise comparisons ------ #
+pairwise_wunifrac <- pairwise.adonis2(dist_wunifrac ~ Timepoint, data = as(sample_data(ps), "data.frame"), strata = "Name")
+print(pairwise_wunifrac)
+
+# Create list of timepoint comparisons
+comparisons <- c("1_vs_2", "1_vs_3", "1_vs_4", "1_vs_6", "2_vs_3", "2_vs_4", "2_vs_6", "3_vs_4", "3_vs_6", "4_vs_6")
+
+# Create an empty tibble with specific columns for all the values.
+stats_wunifrac <- tibble(
+  distance_method = character(),
+  timepoint1 = character(),
+  timepoint2 = character(),
+  df1 = numeric(),
+  df2 = numeric(),
+  R2 = numeric(),
+  F.stat = numeric(),
+  p = numeric()
+)
+
+# Insert values from analysis into the empty tibble
+stats_wunifrac<- comparisons %>% map_dfr(
+  \(x) stats_wunifrac %>% add_row(
+    distance_method = "Weighted uniFrac",
+    timepoint1 = substr(x, 1, 1),
+    timepoint2 = substr(x, 6, 6),
+    df1 = pairwise_wunifrac[[x]]$Df[1],
+    df2 = pairwise_wunifrac[[x]]$Df[2],
+    R2 = pairwise_wunifrac[[x]]$R2[1],
+    F.stat = pairwise_wunifrac[[x]]$F[1],
+    p = pairwise_wunifrac[[x]]$`Pr(>F)`[1]
+  )
+)
+
+View(stats_wunifrac)
+```
+
+Regarding the social living conditions, T2 is significantly different from T3 and T4.
+
+Next, to evaluate the specific bacteria that may be driving this significant effect of social living, we again conducted an LEfSe analyss at the family and genus levels.
+Reported in-text are the family level results. Genus level results are reported in the supplementary files.
+
+Noteably, T1 is significantly different from all timepoints. This is to be expected as it indicates our effect of diet.
+
+</br>
+
+##### Figure 3C: LEfSe Tests & Plots for Social Living Effect
+*Note that the genus level analysis is presented in the supplmental materials and is not discussed in the main text.*
+
+```{r, "Figure 3C: LEfSe Tests & Plots for Social Living Effect"}
+# Differential Bacterial Abundance for Social Living: Timepoints 2, 3, 4, & RSL(T6)
+social_palette <- c("#A6CEE3", "#B2DF8A", "#33A02C", "#1F78B4")
+
+#----- FAMILY LEVEL -----#
+
+# Run LEfSe analysis
+lefse_social_family <- ps_social %>% 
+subset_samples(Timepoint %in% c("2", "3", "4", "6")) %>%
+run_lefse(
+  group = "Timepoint",
+  taxa_rank = "Family",
+  wilcoxon_cutoff = 0.05,
+  kw_cutoff = 0.05,
+  lda_cutoff = 3
+)
+
+# View results
+lefse_social_family_RESULTS <- marker_table(lefse_social_family) %>% as_tibble %>% mutate(Test = "Timepoint") 
+View(lefse_social_family_RESULTS)
+
+# Graph results
+graph_relAbund_Social_family <- lefse_social_family %>%
+plot_abundance(group = "Timepoint") +
+scale_x_continuous(trans = "log10") +
+labs(
+  x = "Total Abundance",
+  y = "Taxon",
+  title = "LEfSe Differential Abundance for Social Living at the Family Level") +
+theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) +
+scale_y_discrete(labels = function(x) gsub("_.*", "", x)) +
+scale_fill_manual(values = alpha(social_palette, 0.6))
+plot(graph_relAbund_Social_family)
+
+#----- GENUS LEVEL -----#
+
+# Run LEfSe analysis
+lefse_social_genus <- ps_social %>%
+subset_samples(Timepoint %in% c("2", "3", "4", "6")) %>%
+run_lefse(
+  group = "Timepoint",
+  taxa_rank = "Genus",
+  wilcoxon_cutoff = 0.05,
+  kw_cutoff = 0.05,
+  lda_cutoff = 3
+)
+
+# View results
+lefse_social_genus_RESULTS <- marker_table(lefse_social_genus) %>% as_tibble %>% mutate(Test = "Timepoint")
+View(lefse_social_genus_RESULTS)
+
+# Graph results
+graph_relAbund_Social_genus <- lefse_social_genus %>%
+plot_abundance(group = "Timepoint") +
+scale_x_continuous(trans = "log10") +
+labs(
+  x = "Total Abundance",
+  y = "Taxon",
+  title = "LEfSe Differential Abundance for Social Living at the Genus Level"
+) +
+theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) +
+scale_y_discrete(labels = function(x) gsub("_.*", "", x)) +
+scale_fill_manual(values = alpha(social_palette, 0.6))
+plot(graph_relAbund_Social_genus)
+```
+
+Two bacterial families, Lactobacillaceae and Clostridiaceae, were identified to be significantly changing across timepoints in the LEfSe analysis for *both* the **diet effect and the social living effect.** 
+We look into the trends of these bacteria next. 
+
+***
+#### Figure 4: Lactobacillaceae and Clostridaceae appear to be equally modulated by a change in diet and social living condition
+
+</br>
+
+**Create dataframe with abundance values**
+```{r, "Create Dataframe with Abundance Values"}
+# Be sure that the required packages are loaded:
+library(tidyverse)
+library(dplyr)
+
+# Create palette for the following graphs
+abund_palette <- c("#E31A1C", "#A6CEE3", "#B2DF8A", "#33A02C", "#1F78B4")
+
+# Create dataframe for the abundance value matrix and for the individual bacteria abundance graphs
+data_melt <- select(melt, Timepoint, Sample, Family, Abundance) %>% 
+  filter(Family != "Other") %>% 
+  pivot_wider(names_from = Family, values_from = Abundance, names_sep = "_", values_fill = 0)
+  
+data_melt <- data_melt[order(data_melt$Timepoint), ]
+
+# strip out the appendices/sample numbers
+clean_names = function(row){
+  prefix = strsplit(row["Sample"], "\\d")[[1]][1]
+  return(prefix)
+}
+
+data_melt$Sample = apply(data_melt, 1, clean_names)
+
+View(data_melt)
+```
+
+</br>
+
+**Create data frames for both bacterial families**
+
+Here we are creating the individual dataframes that are holding the percent abundance values across timepoints for both Lactobacillaceae and Clostridiaceae.
+We next create the plots to show the percent abundance changes for each bacteria across all timepoints. 
+Lactobacillaceae is first printed, followed by Clostridiaceae. These are the main plots used for Fig. 4A and 4B, respectively.
+
+```{r, "Figure 4A: Lactobacillaceae Abundance Changes Across All Timepoints"}
+# Create dataframe for Lacto and clsot data
+lacto_data <- data_melt %>% select(Timepoint, Sample, Lactobacillaceae)
+lacto_data<- lacto_data[order(lacto_data$Sample), ]
+View(lacto_data)
+
+# Create data frame specifically for Clost data 
+clost_data <- data_melt %>% select(Timepoint, Sample, Clostridiaceae)
+clost_data<- clost_data[order(clost_data$Sample), ]
+View(clost_data)
+
+# ---------- 4A = Main Lactobacillaceae Plot: Abund. Change Over Timepoints ---------- #
+
+# Create plot showing abundance values for Lactobacillaceae across all timepoints
+plot_lacto <- ggplot(lacto_data, aes(x = Timepoint, y = Lactobacillaceae, fill = Timepoint)) +
+    stat_summary(aes(y = Lactobacillaceae), fun = mean, geom = "bar", alpha = 0.6) +
+    scale_fill_manual(values = abund_palette) +
+    # stat_compare_means(method = "wilcox.test",position = position_jitter(0.7)) + 
+    geom_point(aes(y = Lactobacillaceae), position = position_jitter(width = 0.1), alpha = 0.6) +
+    theme_bw() +
+    theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) +
+    labs(
+      title = "Bacterial (Lacto) % Abundance Across Time",
+      x = "Timepoint",
+      y = "% Abundance"
+      )
+plot(plot_lacto)
+# Note: Significance bars were added after using Adobe Illustrator
+
+# ---------- 4B = Main Clostridiaceae Plot: Abund. Change Over Timepoints ---------- #
+
+# Create plot showing abundance values for Clostridiaceae across all timepoints
+plot_clost <- ggplot(clost_data, aes(x = Timepoint, y = Clostridiaceae, fill = Timepoint)) +
+    stat_summary(aes(y = Clostridiaceae), fun = mean, geom = "bar", alpha = 0.6) +
+    scale_fill_manual(values = abund_palette) +
+    geom_point(aes(y = Clostridiaceae), position = position_jitter(width = 0.1), alpha = 0.6) +
+    theme_bw() +
+    theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) +
+    labs(
+      title = "Bacterial (Clost) % Abundance Across Time",
+      x = "Timepoint",
+      y = "% Abundance"
+      )
+plot(plot_clost)
+# Note: Significance bars were added after using Adobe Illustrator
+```
+
+</br>
+
+We next conducted pairwise comparisons between each timpeoint for each bacteria to see which timepoints differed significantly in percent abundance.
+However, we first had to filter the data, as some animals did not having samples for all timepoints. Sample exclusion is discussed in the main text.
+
+```{r, "Define Parameters for all of Figure 4"}
+# Define parameters for each of the comparisons made for the Lactobacillaceae and Clostridiaceae data.
+# Different timepoint comparisons will have different animals due to inavailability of samples at different timepoints.
+orange = list(name = "1v2-4", excluded_names = c("Popeye", "Quinn"), excluded_timepoints = c(6))
+yellow = list(name = "1v6", excluded_names = c("Popeye", "Quinn", "Eli"), excluded_timepoints = c(2, 3, 4))
+blue = list(name = "2v3-4", excluded_names = c("No Exclusion"), excluded_timepoints = c(1,6))
+green = list(name = "2v-6", excluded_names = c("Eli"), excluded_timepoints = c(1))
+comparisons = list(orange, yellow, blue, green)
+
+# data structure to hold results for all comparisons
+figure4_data = list(
+  lacto = list(name = "Lactobacillaceae", data = lacto_data, filtered = c(), results = c()), 
+  clost = list(name = "Clostridiaceae", data = clost_data, filtered = c(), results = c())
+)
+```
+
+</br>
+
+**Pairwise comparisons for Figure 4A & 4B**
+
+After filtering and prepping the data non-parametric Wilcoxon signed-rank tests were used to assess significance between the timepoints (for each bacteria).
+
+Note that comparisons of "1v2-4" and "2v3-6" will have repeat pairwise tests (specificialy, comparing timepoints 2, 3, and 4). This is because there are different N values used in each.
+In "1v2-4", N = 11, whereas in "2v3-6", N =13. Thus the comparisons between timepoints 2, 3, and 4 produced from the "1v2-4" comparisons are incomplete. 
+We report the values for the comparisons of timepoints 2, 3, and 4 produced by the "2v3-6" comparisons because the N = 13, which is the full scope of data for those timepoints.
+Importantly, between these sets of comparisons, the significance values detected for the comparisons between timepoints 2, 3 and 4 do not differ.
+
+```{r, "Pairwise comparisons for Figure 4A"}
+# Conduct pairwise comparisons between timepoints to assess significance between timepoints
+for(i in seq_along(figure4_data)){
+  for(j in seq_along(comparisons)){
+
+    # create the filtered dataset based on the appropriate exclusion criteria
+    figure4_data[[i]]$filtered[[j]] = figure4_data[[i]]$data[
+      (!(figure4_data[[i]]$data$Timepoint %in% comparisons[[j]]$excluded_timepoints) 
+      & !(figure4_data[[i]]$data$Sample %in% comparisons[[j]]$excluded_names)), 
+      ]
+
+    # run the wilcoxon test to compare means on the filtered data
+    figure4_data[[i]]$results[[j]] = compare_means(
+        formula = reformulate(termlabels = c("Timepoint"), response = figure4_data[[i]]$name), # formula is 'x ~ y', which is abundance value ~ timepoint
+        data = figure4_data[[i]]$filtered[[j]], 
+        method = "wilcox.test",
+        p.adjust.method = "BH",
+        paired = TRUE
+        )
+      print(figure4_data[[i]]$results[[j]])
+    print(str_glue("Finished calculating wilcox results for Bacteria: {figure4_data[[i]]$name} and Comparison: {comparisons[[j]]$name}"))
+  }
+}
+```
+
+The significant results from these analyses are indicated on Fig. 4A and 4B with significance bars and asterisks (added to figures using Adobe Illustrator).
+
+***
+
+**Create the Inset Graphs for Figure 4A and 4B**
+
+Next we test to see if the changes in percent abundance from T1 to T2 and T2 to T3 differed significantly in each of the two bacteria.
+We again applied a Wilcoxon signed-rank test.
+
+**Note**: We have used the *absolute values* of the differences between each timepoint to assess overall magnitude, rather than direction.
+
+```{r, "Figure 4A: Inset Graph"}
+# ---------- 4A Inset Lactobacillaceae Plot: Diff. in Abundance Changes ---------- #
+
+# select timepoints and remove 'subject'
+filtered_lacto <- lacto_data %>%
+  filter(Timepoint %in% c(1, 2, 3) & !(Sample %in% c("Popeye", "Quinn")))
+
+filtered_lacto <- filtered_lacto %>% pivot_wider(
+  names_from = Timepoint, 
+  values_from = Lactobacillaceae
+  )
+
+filtered_lacto <- filtered_lacto %>% mutate(
+    abso_diffs_T1T2 = abs(filtered_lacto$`1` - filtered_lacto$`2`), 
+    abso_diffs_T2T3 = abs(filtered_lacto$`2` - filtered_lacto$`3`)
+    )
+
+filtered_lacto_diffs <- filtered_lacto %>% select(-`1`, -`2`, -`3`) %>% 
+  pivot_longer(
+  cols = c('abso_diffs_T1T2', 'abso_diffs_T2T3'),
+  names_to = "Timepoint",
+  values_to = "Absolute_Difference"
+  )
+View(filtered_lacto_diffs)
+
+# Run wilcoxon test to compare the differences
+wilcox_test(filtered_lacto_diffs, Absolute_Difference ~ Timepoint, paired = TRUE) %>% add_significance() %>% print()
+
+# Plot the difference in abundances from T1 to T2 vs. T2 to T3
+plot_lacto2 <- ggplot(filtered_lacto_diffs, aes(x = Timepoint, y = Absolute_Difference, fill = Timepoint)) +
+    stat_summary(aes(y = Absolute_Difference), fun = mean, geom = "bar", alpha = 0.6) +
+    geom_point(aes(y = Absolute_Difference), position = position_jitter(width = 0.1), alpha = 0.6) +
+    theme_bw() +
+    theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) +
+    labs(
+      title = "Difference in % Abundance Change in Lacto. Between Timepoints",
+      x = "Timepoints",
+      y = "Absolute Mean Difference in % Abundance Change"
+      )
+
+plot(plot_lacto2)
+
+# ---------- 4B Inset Clostridiaceae Plot: Diff. in Abundance Changes ---------- #
+
+# select timepoints and remove 'subject'
+filtered_clost <- clost_data %>%
+  filter(Timepoint %in% c(1, 2, 3) & !(Sample %in% c("Popeye", "Quinn")))
+
+filtered_clost <- filtered_clost %>% pivot_wider(
+  names_from = Timepoint, 
+  values_from = Clostridiaceae
+  )
+
+filtered_clost <- filtered_clost %>% mutate(
+    abso_diffs_T1T2 = abs(filtered_clost$`1` - filtered_clost$`2`), 
+    abso_diffs_T2T3 = abs(filtered_clost$`2` - filtered_clost$`3`)
+    )
+
+filtered_clost_diffs <- filtered_clost %>% select(-`1`, -`2`, -`3`) %>% 
+  pivot_longer(
+  cols = c('abso_diffs_T1T2', 'abso_diffs_T2T3'),
+  names_to = "Timepoint",
+  values_to = "Absolute_Difference"
+  )
+View(filtered_clost_diffs)
+
+# Run wilcoxon test to compare the differences
+wilcox_test(filtered_clost_diffs, Absolute_Difference ~ Timepoint, paired = TRUE) %>% add_significance() %>% print()
+
+# Plot the difference in abundances from T1 to T2 vs. T2 to T3
+plot_clost2 <- ggplot(filtered_clost_diffs, aes(x = Timepoint, y = Absolute_Difference, fill = Timepoint)) +
+    stat_summary(aes(y = Absolute_Difference), fun = mean, geom = "bar", alpha = 0.6) +
+    geom_point(aes(y = Absolute_Difference), position = position_jitter(width = 0.1), alpha = 0.6) +
+    theme_bw() +
+    theme(plot.title = element_text(face = "bold"), panel.grid = element_blank()) +
+    labs(
+      title = "Difference in % Abundance Change in Clost. Between Timepoints",
+      x = "Timepoints",
+      y = "Absolute Mean Difference in % Abundance Change"
+      )
+plot(plot_clost2)
+```
+
+Importantly, the absolute mean change in percent abundance from T1 to T2 and T2 to T3 in both bacteria was **not** significantly different.
+This suggests that the changes we see in these bacteria as a result of diet are similar in magnitude to the changes we see in these bacteria as a result of their social living condition.
+
+***
+
